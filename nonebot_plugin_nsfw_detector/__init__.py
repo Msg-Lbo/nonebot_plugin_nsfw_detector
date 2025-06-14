@@ -22,7 +22,7 @@ from .config import Config
 # 插件元数据
 __plugin_meta__ = PluginMetadata(
     name="NSFW检测器",
-    description="自动检测群聊中的NSFW图片并进行相应处理",
+    description="基于 nsfwpy.cn API 的 NoneBot2 NSFW 图片检测插件，自动检测群聊中的不当图片并进行相应处理",
     usage="""
 自动功能：
 - 检测群聊中的图片是否为NSFW内容
@@ -55,7 +55,10 @@ enabled: 是否启用检测 (true/false)
 - 群主（owner）
 - 群管理员（admin）
     """,
+    type="application",
+    homepage="https://github.com/Msg-Lbo/nonebot-plugin-nsfw-detector",
     config=Config,
+    supported_adapters={"~onebot.v11"},
 )
 
 # 获取配置
