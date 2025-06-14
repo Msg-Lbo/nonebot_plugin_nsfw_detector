@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-nsfw-detector"
-version = "1.2.0"
+version = "1.3.0"
 description = "基于 nsfwpy.cn API 的 NoneBot2 NSFW 图片检测插件，自动检测群聊中的不当图片并进行相应处理"
 authors = [
     {name = "Msg-Lbo", email = "msglbo@foxmail.com"},

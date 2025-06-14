@@ -49,6 +49,8 @@ ban_time: 禁言时间(分钟)
 warning_limit: 警告次数上限
 kick_enabled: 是否踢出群聊 (true/false)
 enabled: 是否启用检测 (true/false)
+auto_recall: 是否自动撤回插件消息 (true/false)
+recall_delay: 消息撤回延迟时间(秒)
 
 白名单：
 - 超级用户（配置在.env中的SUPERUSERS）
@@ -86,6 +88,8 @@ DEFAULT_GROUP_CONFIG = {
     "ban_time": 60,  # 禁言时间(分钟)
     "warning_limit": 3,  # 警告次数上限
     "kick_enabled": True,  # 是否踢出群聊
+    "auto_recall": True,  # 是否自动撤回插件消息
+    "recall_delay": 5,  # 消息撤回延迟时间(秒)
 }
 
 
@@ -150,6 +154,109 @@ def get_group_config(group_id: str) -> Dict:
         group_configs[group_id] = DEFAULT_GROUP_CONFIG.copy()
         save_data()
     return group_configs[group_id]
+
+
+async def send_with_auto_recall(
+    bot: OneBotV11Bot, 
+    group_id: int, 
+    message: str, 
+    group_config: Dict = None
+) -> None:
+    """发送群消息并根据配置自动撤回"""
+    try:
+        # 发送消息
+        message_info = await bot.send_group_msg(group_id=group_id, message=message)
+        
+        # 调试: 打印消息信息结构
+        logger.info(f"发送消息返回信息: {message_info}, 类型: {type(message_info)}")
+        
+        # 检查是否需要自动撤回
+        if group_config is None:
+            group_config = get_group_config(str(group_id))
+        
+        auto_recall = group_config.get("auto_recall", config.auto_recall_enabled)
+        recall_delay = group_config.get("recall_delay", config.recall_delay)
+        
+        logger.info(f"撤回配置 - 群:{group_id}, 自动撤回:{auto_recall}, 延迟:{recall_delay}秒")
+        
+        if auto_recall and recall_delay > 0:
+            # 尝试多种方式获取消息ID
+            message_id = None
+            
+            # 方式1: 直接从返回值获取
+            if isinstance(message_info, dict):
+                message_id = message_info.get("message_id") or message_info.get("msg_id")
+            
+            # 方式2: 如果返回的是数字，直接使用
+            elif isinstance(message_info, (int, str)):
+                message_id = int(message_info) if str(message_info).isdigit() else None
+            
+            # 方式3: 检查是否有其他可能的字段
+            if not message_id and hasattr(message_info, '__dict__'):
+                for attr in ['message_id', 'msg_id', 'id']:
+                    if hasattr(message_info, attr):
+                        message_id = getattr(message_info, attr)
+                        break
+            
+            logger.info(f"获取到的消息ID: {message_id}, 类型: {type(message_id)}")
+            
+            if message_id:
+                # 延迟撤回
+                async def recall_message():
+                    try:
+                        logger.info(f"开始等待 {recall_delay} 秒后撤回消息 - 群:{group_id}, 消息ID:{message_id}")
+                        await asyncio.sleep(recall_delay)
+                        await bot.delete_msg(message_id=message_id)
+                        logger.info(f"✅ 已自动撤回消息 - 群:{group_id}, 消息ID:{message_id}")
+                    except Exception as e:
+                        logger.warning(f"❌ 自动撤回消息失败 - 群:{group_id}, 消息ID:{message_id}, 错误:{e}")
+                
+                # 创建后台任务
+                task = asyncio.create_task(recall_message())
+                logger.info(f"已创建撤回任务 - 群:{group_id}, 任务ID:{id(task)}")
+            else:
+                logger.warning(f"❌ 无法获取消息ID，跳过自动撤回 - 群:{group_id}")
+        else:
+            logger.info(f"自动撤回未启用或延迟为0 - 群:{group_id}")
+    
+    except Exception as e:
+        logger.error(f"发送消息失败 - 群:{group_id}, 错误:{e}")
+        raise
+
+
+async def smart_send_with_recall(bot: Bot, event: Event, message: str) -> None:
+    """智能发送消息，支持群聊自动撤回"""
+    try:
+        if hasattr(event, 'group_id') and event.group_id:
+            # 群聊消息 - 使用自动撤回功能
+            group_id = int(event.group_id)
+            group_config = get_group_config(str(group_id))
+            
+            # 确保bot是OneBotV11Bot类型
+            if isinstance(bot, OneBotV11Bot):
+                await send_with_auto_recall(bot, group_id, message, group_config)
+            else:
+                # 如果不是OneBot v11，直接发送
+                await bot.send(event, message)
+        else:
+            # 私聊消息 - 直接发送，不撤回
+            await bot.send(event, message)
+    except Exception as e:
+        logger.error(f"智能发送消息失败: {e}")
+        # 回退到普通发送
+        await bot.send(event, message)
+
+
+async def smart_finish_with_recall(matcher, bot: Bot, event: Event, message: str) -> None:
+    """智能结束命令并发送消息，支持群聊自动撤回"""
+    try:
+        await smart_send_with_recall(bot, event, message)
+    except MatcherException:
+        raise
+    except Exception as e:
+        logger.error(f"智能结束命令失败: {e}")
+        # 回退到普通finish
+        await matcher.finish(message)
 
 
 async def detect_nsfw(image_data: bytes) -> Dict:
@@ -437,7 +544,7 @@ async def handle_violation(
         warning_msg += f"💡 还有 {remaining} 次警告机会，请注意您的行为！"
 
     try:
-        await bot.send_group_msg(group_id=int(group_id), message=warning_msg)
+        await send_with_auto_recall(bot, int(group_id), warning_msg, group_config)
     except Exception as e:
         logger.error(f"发送警告消息失败: {e}")
 
@@ -450,6 +557,9 @@ config_cmd = on_command("nsfw_config", permission=SUPERUSER, priority=1, block=T
 set_cmd = on_command("nsfw_set", permission=SUPERUSER, priority=1, block=True)
 status_cmd = on_command("nsfw_status", permission=SUPERUSER, priority=1, block=True)
 reset_cmd = on_command("nsfw_reset", permission=SUPERUSER, priority=1, block=True)
+
+# 测试命令（调试用）
+test_recall_cmd = on_command("nsfw_test_recall", permission=SUPERUSER, priority=1, block=True)
 
 
 @check_cmd.handle()
@@ -469,29 +579,29 @@ async def handle_check(bot: OneBotV11Bot, event: Event):
                 images.append(segment.data["url"])
     
     if not images:
-        await check_cmd.finish("❌ 请发送图片或回复包含图片的消息来使用此命令！")
+        await smart_finish_with_recall(check_cmd, bot, event, "❌ 请发送图片或回复包含图片的消息来使用此命令！")
     
     # 只检测第一张图片
     image_url = images[0]
     
     try:
-        await bot.send(event, "🔍 正在检测图片，请稍候...")
+        await smart_send_with_recall(bot, event, "🔍 正在检测图片，请稍候...")
         
         # 下载图片
         try:
             image_data = await download_image(image_url)
         except ValueError as e:
-            await check_cmd.finish(f"❌ 图片下载失败: {str(e)}")
+            await smart_finish_with_recall(check_cmd, bot, event, f"❌ 图片下载失败: {str(e)}")
         except Exception as e:
             logger.error(f"图片下载异常: {e}")
-            await check_cmd.finish("❌ 图片下载失败，请稍后重试")
+            await smart_finish_with_recall(check_cmd, bot, event, "❌ 图片下载失败，请稍后重试")
         
         # 检测NSFW
         try:
             result = await detect_nsfw(image_data)
         except Exception as e:
             logger.error(f"NSFW检测异常: {e}")
-            await check_cmd.finish("❌ 图片检测失败，请稍后重试")
+            await smart_finish_with_recall(check_cmd, bot, event, "❌ 图片检测失败，请稍后重试")
         
         # 构建回复消息
         msg = "📊 NSFW检测结果:\n\n"
@@ -555,12 +665,12 @@ async def handle_check(bot: OneBotV11Bot, event: Event):
         msg += f"\n\n📈 综合风险评级: {risk_level}"
         msg += f"\n📏 风险得分: {risk_score:.2%}"
         
-        await check_cmd.finish(msg)
+        await smart_finish_with_recall(check_cmd, bot, event, msg)
     except MatcherException:
         raise
     except Exception as e:
         logger.error(f"检测图片时发生错误: {e}")
-        await check_cmd.finish(f"❌ 检测失败: {str(e)}")
+        await smart_finish_with_recall(check_cmd, bot, event, f"❌ 检测失败: {str(e)}")
 
 
 @config_cmd.handle()
@@ -571,7 +681,7 @@ async def handle_config(bot: Bot, event: Event):
     for key, value in DEFAULT_GROUP_CONFIG.items():
         msg += f"  {key}: {value}\n"
 
-    await config_cmd.finish(msg)
+    await smart_finish_with_recall(config_cmd, bot, event, msg)
 
 
 @set_cmd.handle()
@@ -606,8 +716,8 @@ async def handle_set(bot: Bot, event: Event):
         usage_msg = "❌ 用法:\n"
         usage_msg += "• 在群聊中: /nsfw_set <参数> <值>\n"
         usage_msg += "• 指定群聊: /nsfw_set <群号> <参数> <值>\n"
-        usage_msg += "参数: threshold, ban_time, warning_limit, kick_enabled, enabled"
-        await set_cmd.finish(usage_msg)
+        usage_msg += "参数: threshold, ban_time, warning_limit, kick_enabled, enabled, auto_recall, recall_delay"
+        await smart_finish_with_recall(set_cmd, bot, event, usage_msg)
 
     try:
 
@@ -625,16 +735,20 @@ async def handle_set(bot: Bot, event: Event):
             group_config["kick_enabled"] = value.lower() in ["true", "1", "yes"]
         elif param == "enabled":
             group_config["enabled"] = value.lower() in ["true", "1", "yes"]
+        elif param == "auto_recall":
+            group_config["auto_recall"] = value.lower() in ["true", "1", "yes"]
+        elif param == "recall_delay":
+            group_config["recall_delay"] = int(value)
         else:
-            await set_cmd.finish(f"❌ 未知参数: {param}")
+            await smart_finish_with_recall(set_cmd, bot, event, f"❌ 未知参数: {param}")
 
         save_data()
-        await set_cmd.finish(f"✅ 已设置群 {group_id} 的 {param} = {value}")
+        await smart_finish_with_recall(set_cmd, bot, event, f"✅ 已设置群 {group_id} 的 {param} = {value}")
 
     except MatcherException:
         raise
     except Exception as e:
-        await set_cmd.finish(f"❌ 设置失败: {e}")
+        await smart_finish_with_recall(set_cmd, bot, event, f"❌ 设置失败: {e}")
 
 
 @status_cmd.handle()
@@ -665,7 +779,7 @@ async def handle_status(bot: Bot, event: Event):
         usage_msg = "❌ 用法:\n"
         usage_msg += "• 在群聊中: /nsfw_status\n"
         usage_msg += "• 指定群聊: /nsfw_status <群号>"
-        await status_cmd.finish(usage_msg)
+        await smart_finish_with_recall(status_cmd, bot, event, usage_msg)
     group_config = get_group_config(group_id)
 
     msg = f"📊 群 {group_id} 的NSFW检测状态:\n\n"
@@ -678,7 +792,7 @@ async def handle_status(bot: Bot, event: Event):
         for user_id, data in user_warnings[group_id].items():
             msg += f"  {user_id}: {data['count']}次 (最后: {data['last_time'].strftime('%Y-%m-%d %H:%M:%S')})\n"
 
-    await status_cmd.finish(msg)
+    await smart_finish_with_recall(status_cmd, bot, event, msg)
 
 
 @reset_cmd.handle()
@@ -715,7 +829,7 @@ async def handle_reset(bot: Bot, event: Event):
     if len(args) == 0:
         # 没有参数，默认当前群，重置所有用户
         if not current_group_id:
-            await reset_cmd.finish("❌ 请在群聊中使用此命令，或指定群号")
+            await smart_finish_with_recall(reset_cmd, bot, event, "❌ 请在群聊中使用此命令，或指定群号")
         group_id = current_group_id
         user_id = None
 
@@ -724,7 +838,7 @@ async def handle_reset(bot: Bot, event: Event):
         arg = args[0]
         if not arg.isdigit():
             # 不是纯数字，无效参数
-            await reset_cmd.finish("❌ 参数必须是数字（群号或用户QQ）")
+            await smart_finish_with_recall(reset_cmd, bot, event, "❌ 参数必须是数字（群号或用户QQ）")
         elif current_group_id:
             # 在群聊中，优先判断为用户QQ（通常QQ号比群号长）
             if len(arg) >= 8:  # QQ号通常8位以上
@@ -745,24 +859,24 @@ async def handle_reset(bot: Bot, event: Event):
         user_id = args[1]
 
     else:
-        await reset_cmd.finish(
+        await smart_finish_with_recall(reset_cmd, bot, event, 
             "❌ 参数过多！用法:\n• /nsfw_reset - 重置当前群所有记录\n• /nsfw_reset 用户QQ - 重置当前群指定用户\n• /nsfw_reset 群号 - 重置指定群所有记录\n• /nsfw_reset 群号 用户QQ - 重置指定群指定用户\n• /nsfw_reset @用户 - 重置当前群@的用户"
         )
 
     # 如果有@用户，优先使用@的用户ID
     if at_user_id:
         if not current_group_id:
-            await reset_cmd.finish("❌ @用户功能只能在群聊中使用")
+            await smart_finish_with_recall(reset_cmd, bot, event, "❌ @用户功能只能在群聊中使用")
         group_id = current_group_id
         user_id = at_user_id
 
     # 验证群号格式
     if not group_id or not group_id.isdigit():
-        await reset_cmd.finish("❌ 群号必须是数字")
+        await smart_finish_with_recall(reset_cmd, bot, event, "❌ 群号必须是数字")
 
     # 验证用户QQ格式
     if user_id is not None and not str(user_id).isdigit():
-        await reset_cmd.finish("❌ 用户QQ必须是数字")
+        await smart_finish_with_recall(reset_cmd, bot, event, "❌ 用户QQ必须是数字")
 
     logger.info(f"Reset命令执行 - 群:{group_id}, 用户:{user_id}")
 
@@ -772,14 +886,32 @@ async def handle_reset(bot: Bot, event: Event):
 
         # 返回成功消息
         if user_id:
-            await reset_cmd.finish(
+            await smart_finish_with_recall(reset_cmd, bot, event,
                 f"✅ 已重置群 {group_id} 中用户 {user_id} 的警告记录"
             )
         else:
-            await reset_cmd.finish(f"✅ 已重置群 {group_id} 的所有警告记录")
+            await smart_finish_with_recall(reset_cmd, bot, event, f"✅ 已重置群 {group_id} 的所有警告记录")
 
     except MatcherException:
         raise
     except Exception as e:
         logger.error(f"重置警告记录失败: {e}")
-        await reset_cmd.finish(f"❌ 重置失败: {str(e)}")
+        await smart_finish_with_recall(reset_cmd, bot, event, f"❌ 重置失败: {str(e)}")
+
+
+@test_recall_cmd.handle()
+async def handle_test_recall(bot: OneBotV11Bot, event: Event):
+    """测试自动撤回功能"""
+    if not hasattr(event, 'group_id') or not event.group_id:
+        await smart_finish_with_recall(test_recall_cmd, bot, event, "❌ 此命令只能在群聊中使用")
+    
+    group_id = int(event.group_id)
+    group_config = get_group_config(str(group_id))
+    
+    try:
+        test_message = f"🧪 这是一条测试消息，将在 {group_config.get('recall_delay', 5)} 秒后自动撤回"
+        await send_with_auto_recall(bot, group_id, test_message, group_config)
+        logger.info(f"已发送测试撤回消息 - 群:{group_id}")
+    except Exception as e:
+        logger.error(f"测试撤回功能失败: {e}")
+        await smart_finish_with_recall(test_recall_cmd, bot, event, f"❌ 测试失败: {e}")

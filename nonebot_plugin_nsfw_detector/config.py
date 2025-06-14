@@ -16,6 +16,13 @@ class Config(BaseModel):
     default_warning_limit: int = 3
     default_kick_enabled: bool = True
     
+    # 消息撤回配置
+    auto_recall_enabled: bool = True
+    recall_delay: int = 5  # 撤回延迟时间(秒)
+    
+    # 调试配置
+    debug_mode: bool = False  # 是否启用调试模式
+    
     # 数据存储配置
     data_dir: str = "data/nsfw_detector"
     

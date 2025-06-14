@@ -7,11 +7,13 @@
 - 🔍 **自动检测**：实时检测群聊中的图片内容
 - ⚠️ **智能警告**：对违规用户进行警告和记录
 - 🔇 **自动禁言**：违规后自动禁言指定时间
-- 🗑️ **消息撤回**：自动撤回违规图片消息
+- 🗑️ **消息撤回**：自动撤回违规图片消息和插件消息
 - 👢 **踢出群聊**：达到警告上限后可自动踢出
 - ⚙️ **灵活配置**：支持每个群组独立配置参数
 - 📊 **数据持久化**：警告记录和配置自动保存
 - 🛡️ **智能白名单**：自动跳过管理员、群主和超级用户
+- 🧪 **测试功能**：提供测试命令验证功能运行状态
+- ⏰ **定时撤回**：插件消息可配置延迟自动撤回
 
 ## 安装配置
 
@@ -85,6 +87,8 @@ SUPERUSERS=["你的QQ号"]
 /nsfw_set warning_limit 2      # 设置当前群警告上限
 /nsfw_set kick_enabled false   # 禁用踢出功能
 /nsfw_set enabled false        # 禁用检测功能
+/nsfw_set auto_recall true     # 启用消息自动撤回
+/nsfw_set recall_delay 10      # 设置撤回延迟时间
 
 # 指定群聊设置
 /nsfw_set 群号 threshold 0.3   # 设置指定群配置
@@ -104,6 +108,11 @@ SUPERUSERS=["你的QQ号"]
 /nsfw_reset 群号 用户QQ        # 重置指定群指定用户
 ```
 
+#### 测试功能
+```bash
+/nsfw_test_recall              # 测试消息自动撤回功能
+```
+
 ### 配置参数说明
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -113,6 +122,8 @@ SUPERUSERS=["你的QQ号"]
 | `warning_limit` | int | 3 | 警告次数上限，达到后执行踢出 |
 | `kick_enabled` | bool | true | 是否启用踢出功能 |
 | `enabled` | bool | true | 是否启用NSFW检测 |
+| `auto_recall` | bool | true | 是否自动撤回插件发送的消息 |
+| `recall_delay` | int | 5 | 消息撤回延迟时间（秒） |
 
 ### 工作流程
 
@@ -148,6 +159,13 @@ SUPERUSERS=["你的QQ号"]
 # 设置宽松的检测（仅警告不踢出）
 /nsfw_set threshold 0.8
 /nsfw_set kick_enabled false
+
+# 设置消息撤回（启用自动撤回，10秒后撤回）
+/nsfw_set auto_recall true
+/nsfw_set recall_delay 10
+
+# 禁用消息撤回
+/nsfw_set auto_recall false
 ```
 
 ## 数据存储
@@ -184,6 +202,11 @@ SUPERUSERS=["你的QQ号"]
 8. **检测超时**：
    - 网络较慢时可能出现超时，插件会自动重试
    - 可以稍后重新发送图片进行检测
+9. **消息撤回失败**：
+   - 确保机器人有撤回消息的权限
+   - 消息可能已经被其他人撤回
+   - 使用 `/nsfw_test_recall` 命令测试撤回功能
+   - 检查 `recall_delay` 设置是否合理（建议1-30秒）
 
 ### 日志查看
 
@@ -202,6 +225,12 @@ SUPERUSERS=["你的QQ号"]
 - **框架版本**：NoneBot2 + OneBot V11
 
 ## 更新日志
+
+### v1.3.0
+- 🗑️ 新增消息自动撤回功能
+- ⚙️ 新增 `auto_recall` 和 `recall_delay` 配置参数
+- 🧪 新增 `/nsfw_test_recall` 测试命令
+- 📝 优化日志记录和错误处理
 
 ### v1.2.0
 - 🆕 新增 `/nsfw_check` 用户命令
