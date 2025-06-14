@@ -1,4 +1,5 @@
 import json
+import asyncio
 from pathlib import Path
 from typing import Dict
 from datetime import datetime
@@ -28,6 +29,9 @@ __plugin_meta__ = PluginMetadata(
 - 对违规用户进行警告、禁言、撤回消息
 - 达到阈值后可踢出群聊
 - 自动跳过管理员、群主和超级用户
+
+用户命令：
+/nsfw_check - 检测图片的NSFW内容（回复图片或附带图片发送）
 
 管理员命令：
 /nsfw_config - 查看默认配置
@@ -169,14 +173,63 @@ async def detect_nsfw(image_data: bytes) -> Dict:
 
 async def download_image(image_url: str) -> bytes:
     """下载图片"""
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(image_url)
-            response.raise_for_status()
-            return response.content
-    except Exception as e:
-        logger.error(f"图片下载失败: {e}")
-        raise
+    # 设置请求头，模拟QQ客户端
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Referer': 'https://web.qun.qq.com/',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    }
+    
+    # 尝试多次下载
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(image_url, headers=headers)
+                response.raise_for_status()
+                
+                # 检查响应内容类型
+                content_type = response.headers.get('content-type', '')
+                if not content_type.startswith('image/'):
+                    logger.warning(f"响应内容类型不是图片: {content_type}")
+                
+                # 检查内容长度
+                content = response.content
+                if len(content) < 100:  # 太小的文件可能不是有效图片
+                    raise ValueError(f"下载的文件太小: {len(content)} bytes")
+                
+                logger.info(f"成功下载图片，大小: {len(content)} bytes")
+                return content
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP错误 (尝试 {attempt + 1}/{max_retries}): {e.response.status_code} - {e}")
+            if e.response.status_code == 403:
+                logger.error("图片访问被拒绝，可能是权限问题")
+            elif e.response.status_code == 404:
+                logger.error("图片不存在或已过期")
+            
+            if attempt == max_retries - 1:
+                raise ValueError(f"图片下载失败: HTTP {e.response.status_code}")
+                
+        except httpx.TimeoutException:
+            logger.error(f"下载超时 (尝试 {attempt + 1}/{max_retries})")
+            if attempt == max_retries - 1:
+                raise ValueError("图片下载超时")
+                
+        except Exception as e:
+            logger.error(f"下载失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                raise ValueError(f"图片下载失败: {str(e)}")
+        
+        # 等待一段时间后重试
+        if attempt < max_retries - 1:
+            await asyncio.sleep(1)
+    
+    raise ValueError("图片下载失败: 超过最大重试次数")
 
 
 def add_warning(group_id: str, user_id: str) -> int:
@@ -247,7 +300,7 @@ async def is_user_privileged(bot: OneBotV11Bot, group_id: int, user_id: int) -> 
 
 
 # 消息处理器
-message_handler = on_message(priority=1, block=False)
+message_handler = on_message(priority=5, block=False)
 
 
 @message_handler.handle()
@@ -258,7 +311,7 @@ async def handle_message(bot: OneBotV11Bot, event: GroupMessageEvent, state: T_S
 
     # 跳过命令消息
     message_text = str(event.get_message()).strip()
-    if message_text.startswith("/") or message_text.startswith("nsfw_"):
+    if message_text.startswith("/"):
         return
 
     # 获取群组配置
@@ -285,10 +338,21 @@ async def handle_message(bot: OneBotV11Bot, event: GroupMessageEvent, state: T_S
     for image_url in images:
         try:
             # 下载图片
-            image_data = await download_image(image_url)
+            try:
+                image_data = await download_image(image_url)
+            except ValueError as e:
+                logger.warning(f"图片下载失败，跳过检测 - 群:{group_id}, 用户:{user_id}, 错误:{e}")
+                continue
+            except Exception as e:
+                logger.error(f"图片下载异常，跳过检测 - 群:{group_id}, 用户:{user_id}, 错误:{e}")
+                continue
 
             # 检测NSFW
-            result = await detect_nsfw(image_data)
+            try:
+                result = await detect_nsfw(image_data)
+            except Exception as e:
+                logger.error(f"NSFW检测失败，跳过检测 - 群:{group_id}, 用户:{user_id}, 错误:{e}")
+                continue
 
             # 分析结果
             hentai_prob = 0.0
@@ -308,7 +372,7 @@ async def handle_message(bot: OneBotV11Bot, event: GroupMessageEvent, state: T_S
                 break  # 只要有一张图片违规就处理
 
         except Exception as e:
-            logger.error(f"处理图片时发生错误: {e}")
+            logger.error(f"处理图片时发生未知错误: {e}")
             continue
 
 
@@ -375,11 +439,125 @@ async def handle_violation(
         logger.error(f"发送警告消息失败: {e}")
 
 
+# 用户命令
+check_cmd = on_command("nsfw_check", priority=1, block=True)
+
 # 管理员命令
-config_cmd = on_command("nsfw_config", permission=SUPERUSER, priority=10, block=True)
-set_cmd = on_command("nsfw_set", permission=SUPERUSER, priority=10, block=True)
-status_cmd = on_command("nsfw_status", permission=SUPERUSER, priority=10, block=True)
-reset_cmd = on_command("nsfw_reset", permission=SUPERUSER, priority=10, block=True)
+config_cmd = on_command("nsfw_config", permission=SUPERUSER, priority=1, block=True)
+set_cmd = on_command("nsfw_set", permission=SUPERUSER, priority=1, block=True)
+status_cmd = on_command("nsfw_status", permission=SUPERUSER, priority=1, block=True)
+reset_cmd = on_command("nsfw_reset", permission=SUPERUSER, priority=1, block=True)
+
+
+@check_cmd.handle()
+async def handle_check(bot: OneBotV11Bot, event: Event):
+    """检测图片的NSFW内容"""
+    images = []
+    
+    # 检查消息中是否有图片
+    for segment in event.message:
+        if segment.type == "image":
+            images.append(segment.data["url"])
+    
+    # 如果命令消息本身没有图片，检查是否回复了包含图片的消息
+    if not images and hasattr(event, 'reply') and event.reply:
+        for segment in event.reply.message:
+            if segment.type == "image":
+                images.append(segment.data["url"])
+    
+    if not images:
+        await check_cmd.finish("❌ 请发送图片或回复包含图片的消息来使用此命令！")
+    
+    # 只检测第一张图片
+    image_url = images[0]
+    
+    try:
+        await bot.send(event, "🔍 正在检测图片，请稍候...")
+        
+        # 下载图片
+        try:
+            image_data = await download_image(image_url)
+        except ValueError as e:
+            await check_cmd.finish(f"❌ 图片下载失败: {str(e)}")
+        except Exception as e:
+            logger.error(f"图片下载异常: {e}")
+            await check_cmd.finish("❌ 图片下载失败，请稍后重试")
+        
+        # 检测NSFW
+        try:
+            result = await detect_nsfw(image_data)
+        except Exception as e:
+            logger.error(f"NSFW检测异常: {e}")
+            await check_cmd.finish("❌ 图片检测失败，请稍后重试")
+        
+        # 构建回复消息
+        msg = "📊 NSFW检测结果:\n\n"
+        
+        # 显示各类别概率
+        msg += "🎯 检测结果:\n"
+        predictions = result.get("predictions", [])
+        for prediction in predictions:
+            class_name = prediction["className"]
+            probability = prediction["probability"]
+            
+            # 添加相应的emoji
+            emoji_map = {
+                "Drawing": "🎨",
+                "Hentai": "🔞",
+                "Neutral": "😊", 
+                "Porn": "🚫",
+                "Sexy": "💋"
+            }
+            emoji = emoji_map.get(class_name, "📋")
+            
+            msg += f"  {emoji} {class_name}: {probability:.2%}\n"
+        
+        # 显示处理时间
+        processing_time = result.get("processing_time", {})
+        if processing_time:
+            total_time = processing_time.get("total", "未知")
+            api_time = processing_time.get("api", "未知")
+            msg += f"\n⏱️ 处理时间:\n"
+            msg += f"  总耗时: {total_time}\n"
+            msg += f"  API耗时: {api_time}\n"
+        
+        # 显示模型信息
+        model = result.get("model", "未知")
+        msg += f"\n🤖 检测模型: {model}"
+        
+        # 添加风险评级
+        hentai_prob = 0.0
+        porn_prob = 0.0
+        sexy_prob = 0.0
+        
+        for prediction in predictions:
+            if prediction["className"] == "Hentai":
+                hentai_prob = prediction["probability"]
+            elif prediction["className"] == "Porn":
+                porn_prob = prediction["probability"]
+            elif prediction["className"] == "Sexy":
+                sexy_prob = prediction["probability"]
+        
+        risk_score = max(hentai_prob, porn_prob) + sexy_prob * 0.5
+        
+        if risk_score >= 0.8:
+            risk_level = "🚨 高风险"
+        elif risk_score >= 0.5:
+            risk_level = "⚠️ 中风险"
+        elif risk_score >= 0.2:
+            risk_level = "🟡 低风险"
+        else:
+            risk_level = "✅ 安全"
+            
+        msg += f"\n\n📈 综合风险评级: {risk_level}"
+        msg += f"\n📏 风险得分: {risk_score:.2%}"
+        
+        await check_cmd.finish(msg)
+    except MatcherException:
+        raise
+    except Exception as e:
+        logger.error(f"检测图片时发生错误: {e}")
+        await check_cmd.finish(f"❌ 检测失败: {str(e)}")
 
 
 @config_cmd.handle()
